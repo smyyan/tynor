@@ -42,7 +42,7 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepinfra.com/v1/openai")
 
 # Qdrant Cloud (vector store) - create a free cluster at cloud.qdrant.io
-QDRANT_URL     = os.environ.get("QDRANT_URL","")       # e.g. https://xxxx.cloud.qdrant.io:6333
+QDRANT_URL     = os.environ.get("QDRANT_URL", "https://3847198c-6464-4edb-aa66-760fab05f073.us-east-1-1.aws.cloud.qdrant.io")       # e.g. https://xxxx.cloud.qdrant.io:6333
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
 
 GRAPH_TENANT_ID     = os.environ.get("GRAPH_TENANT_ID", "")     # from IT (app registration)
@@ -723,7 +723,8 @@ if question:
                 from openai import OpenAI
                 retrieved, used_depts, conf, sources = retrieve(question)
                 context = "\n\n---\n\n".join(retrieved)
-                client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+                client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL,
+                                timeout=90.0, max_retries=1)
 
                 # Reasoning/thinking mode:
                 #  - DeepSeek-direct: enabled via extra_body on the Precise model.
