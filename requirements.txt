@@ -4,6 +4,5 @@ msal
 requests
 python-docx
 pypdf
-sentence-transformers
 qdrant-client
 numpy
