@@ -19,7 +19,7 @@ vars below. No code change needed to switch hosts.
                   models like  deepseek-v4-flash
 
 INSTALL:
-  pip install streamlit openai msal requests python-docx pypdf sentence-transformers qdrant-client numpy
+  pip install streamlit openai msal requests python-docx pypdf qdrant-client numpy
 RUN:
   streamlit run tynor_sop_assistant.py
 
@@ -62,7 +62,8 @@ MODEL_PRECISE = os.environ.get("MODEL_PRECISE", "deepseek-ai/DeepSeek-V4-Pro")
 MODEL_QUICK   = os.environ.get("MODEL_QUICK",   "deepseek-ai/DeepSeek-V4-Flash")
 # ============================================================
 
-EMBED_MODEL = "all-MiniLM-L6-v2"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # DeepInfra embeddings model (same weights as the old local model)
+EMBED_DIM   = 384                                        # all-MiniLM-L6-v2 output dimension
 TOP_K = 6                       # per-question chunks (scope is narrowed by routing, so this stays low)
 ROUTE_DEPTS = 2                 # how many top departments to route into (besides the always-include ones)
 CHUNK_MAX_CHARS = 2500
@@ -271,10 +272,28 @@ def chunk_document(name, dept, text):
 
 
 # ----------------------------- VECTOR STORE -----------------------------
-@st.cache_resource(show_spinner=False)
-def get_embedder():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(EMBED_MODEL)
+def embed_texts(texts):
+    """Embed a list of strings via DeepInfra's embeddings API (all-MiniLM-L6-v2, 384-dim).
+    Returns L2-normalized numpy vectors so downstream dot-products = cosine similarity,
+    matching the previous local `encode(..., normalize_embeddings=True)` behavior.
+    No PyTorch / sentence-transformers loaded locally -> tiny memory footprint."""
+    import requests
+    out = []
+    for start in range(0, len(texts), 100):  # batch to stay within request limits
+        batch = texts[start:start + 100]
+        resp = requests.post(
+            f"{DEEPSEEK_BASE_URL}/embeddings",
+            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"model": EMBED_MODEL, "input": batch, "encoding_format": "float"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        for item in sorted(resp.json()["data"], key=lambda d: d["index"]):
+            v = np.array(item["embedding"], dtype=float)
+            n = np.linalg.norm(v)
+            out.append(v / n if n > 0 else v)
+    return out
 
 
 @st.cache_resource(show_spinner=False)
@@ -288,7 +307,7 @@ def ensure_collection():
     from qdrant_client.models import Distance, VectorParams
     client = get_client()
     if not client.collection_exists(COLLECTION):
-        dim = get_embedder().get_sentence_embedding_dimension()
+        dim = EMBED_DIM
         client.create_collection(
             collection_name=COLLECTION,
             vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
@@ -312,7 +331,6 @@ def file_key(name, dept, etag):
 def sync_store(status_area):
     from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct, FilterSelector
     import uuid
-    embedder = get_embedder()
     ensure_collection()
     client = get_client()
     token = get_graph_token()
@@ -356,7 +374,7 @@ def sync_store(status_area):
         doc_chunks = chunk_document(name, dept, text)
         if not doc_chunks:
             continue
-        embs = embedder.encode(doc_chunks, normalize_embeddings=True, show_progress_bar=False).tolist()
+        embs = [v.tolist() for v in embed_texts(doc_chunks)]
         pts = [
             PointStruct(
                 id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{fkey}_{i}")),
@@ -404,8 +422,7 @@ def department_centroids():
 
 
 def route_departments(question):
-    embedder = get_embedder()
-    q = embedder.encode([question], normalize_embeddings=True)[0]
+    q = embed_texts([question])[0]
     cents = department_centroids()
     if not cents:
         return None
@@ -421,10 +438,9 @@ def route_departments(question):
 def retrieve(question):
     from qdrant_client.models import Filter, FieldCondition, MatchAny
     client = get_client()
-    embedder = get_embedder()
     if not client.collection_exists(COLLECTION):
         return [], None, {"weak": True, "best_sim": 0.0, "n_chunks": 0}, {}
-    q = embedder.encode([question], normalize_embeddings=True)[0].tolist()
+    q = embed_texts([question])[0].tolist()
     depts = route_departments(question)
     qfilter = Filter(must=[FieldCondition(key="department", match=MatchAny(any=depts))]) if depts else None
 
